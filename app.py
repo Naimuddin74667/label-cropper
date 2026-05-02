@@ -35,7 +35,7 @@ def _save_pdf(image_paths, output_pdf, dpi=200):
 def crop_flipkart_labels(input_pdf, output_pdf):
     from PIL import Image
     import numpy as np
-    DPI = 200
+    DPI = 150
     margin_px = int(0.3 / 2.54 * DPI)
     tmp_dir = tempfile.mkdtemp()
     prefix  = os.path.join(tmp_dir, "page")
@@ -121,7 +121,7 @@ def detect_fbf_label_boxes(arr, label_left, label_right):
 def crop_fbf_labels(input_pdf, output_pdf):
     from PIL import Image
     import numpy as np
-    DPI = 200
+    DPI = 150
     margin_px = int(0.3 / 2.54 * DPI)
     tmp_dir = tempfile.mkdtemp()
     prefix  = os.path.join(tmp_dir, "page")
