@@ -72,6 +72,52 @@ def crop_flipkart_labels(input_pdf, output_pdf):
     _save_pdf(cropped_paths, output_pdf, DPI)
     shutil.rmtree(tmp_dir, ignore_errors=True)
 
+def detect_fbf_label_boxes(arr, label_left, label_right):
+    """Auto-detect the two label box positions on a FBF page."""
+    import numpy as np
+    H = arr.shape[0]
+    gray = arr.min(axis=2)
+
+    # Find all full-span horizontal borders
+    solid_lines = [y for y in range(H)
+                   if np.sum(gray[y, label_left:label_right] < 100) > (label_right - label_left) * 0.85]
+    if not solid_lines:
+        return [(79, 858), (943, 1722)]  # fallback
+
+    # Cluster into border groups
+    clusters, cluster = [], [solid_lines[0]]
+    for y in solid_lines[1:]:
+        if y - cluster[-1] <= 5:
+            cluster.append(y)
+        else:
+            clusters.append(cluster); cluster = [y]
+    clusters.append(cluster)
+    borders = [min(c) for c in clusters]
+
+    # Find the TWO biggest gaps between borders — these separate inside-label content
+    # The INTER-label gap (between label1 bottom and label2 top) is the SMALLEST big gap
+    # Strategy: find pairs (top, bottom) where bottom-top > 40% of page height
+    label_boxes = []
+    i = 0
+    while i < len(borders) - 1 and len(label_boxes) < 2:
+        top = borders[i]
+        # Find the next border that's far enough to be a label bottom
+        for j in range(i + 1, len(borders)):
+            gap = borders[j] - top
+            if gap > H * 0.35:  # label must be at least 35% of page height
+                label_boxes.append((top, borders[j]))
+                i = j
+                break
+        else:
+            i += 1
+
+    if len(label_boxes) < 2:
+        # Fallback: use first and last border positions
+        label_boxes = [(borders[0], borders[len(borders)//2]),
+                       (borders[len(borders)//2+1], borders[-1])]
+
+    return label_boxes
+
 def crop_fbf_labels(input_pdf, output_pdf):
     from PIL import Image
     import numpy as np
@@ -84,43 +130,14 @@ def crop_fbf_labels(input_pdf, output_pdf):
     if not pages:
         raise RuntimeError("No pages found in PDF.")
 
-    # Auto-detect from first page
+    # Detect layout from first page
     img0  = Image.open(str(pages[0])).convert("RGB")
     arr0  = np.array(img0)
     H0, W0 = arr0.shape[:2]
     gray0 = arr0.min(axis=2)
-
     label_left  = next((x for x in range(W0)      if np.sum(gray0[:, x] < 100) > 200), 0)
     label_right = next((x for x in range(W0-1,0,-1) if np.sum(gray0[:, x] < 100) > 200), W0-1)
-
-    solid_lines = [y for y in range(H0)
-                   if np.sum(gray0[y, label_left:label_right] < 100) > (label_right-label_left)*0.6]
-
-    clusters, cluster = [], [solid_lines[0]]
-    for y in solid_lines[1:]:
-        if y - cluster[-1] <= 5:
-            cluster.append(y)
-        else:
-            clusters.append(cluster); cluster = [y]
-    clusters.append(cluster)
-
-    tops_bottoms = [(min(c), max(c)) for c in clusters]
-    label_boxes = []
-    i = 0
-    while i < len(tops_bottoms) - 1:
-        top = tops_bottoms[i][0]
-        for j in range(i+1, len(tops_bottoms)):
-            if tops_bottoms[j][0] - top > H0 * 0.2:
-                label_boxes.append((top, tops_bottoms[j][1]))
-                i = j + 1
-                break
-        else:
-            break
-        if len(label_boxes) == 2:
-            break
-
-    if len(label_boxes) < 2:
-        label_boxes = [(79, 858), (943, 1722)]
+    label_boxes = detect_fbf_label_boxes(arr0, label_left, label_right)
 
     cl = max(0, label_left  - margin_px)
     cr =       label_right  + margin_px
@@ -213,50 +230,27 @@ HTML = """<!DOCTYPE html>
   <div class="error" id="errorBox"></div>
 </div>
 <script>
-  let mode='flipkart', selectedFile=null;
+  let mode='flipkart',selectedFile=null;
   const descs={
     flipkart:'Upload your Flipkart / E-Kart shipping invoice PDF. Auto-detects and crops each shipping label, removes the invoice section. Equal 0.3cm gap on all sides.',
-    fbf:'Upload your FBF Box Sticker PDF (2 labels per page). Each label is split into its own page — blank pages removed automatically. Equal 0.3cm gap on all sides.'
+    fbf:'Upload your FBF Box Sticker PDF (2 labels per page). Each label is split into its own page — blank pages removed automatically. Works with all label sizes. Equal 0.3cm gap on all sides.'
   };
-  function switchTab(m,el){
-    mode=m;
-    document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
-    el.classList.add('active');
-    document.getElementById('desc').textContent=descs[m];
-    resetApp();
-  }
-  const fileInput=document.getElementById('fileInput');
-  const dropZone=document.getElementById('dropZone');
-  const cropBtn=document.getElementById('cropBtn');
-  const fileName=document.getElementById('fileName');
+  function switchTab(m,el){mode=m;document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));el.classList.add('active');document.getElementById('desc').textContent=descs[m];resetApp();}
+  const fileInput=document.getElementById('fileInput'),dropZone=document.getElementById('dropZone'),cropBtn=document.getElementById('cropBtn'),fileName=document.getElementById('fileName');
   fileInput.addEventListener('change',e=>setFile(e.target.files[0]));
   dropZone.addEventListener('dragover',e=>{e.preventDefault();dropZone.classList.add('dragover');});
   dropZone.addEventListener('dragleave',()=>dropZone.classList.remove('dragover'));
   dropZone.addEventListener('drop',e=>{e.preventDefault();dropZone.classList.remove('dragover');setFile(e.dataTransfer.files[0]);});
-  function setFile(f){
-    if(!f||!f.name.endsWith('.pdf')){alert('Please select a PDF file.');return;}
-    selectedFile=f;
-    fileName.textContent='📄 '+f.name;
-    fileName.style.display='block';
-    cropBtn.disabled=false;
-    document.getElementById('resultBox').style.display='none';
-    document.getElementById('errorBox').style.display='none';
-  }
-  function setProgress(pct,msg){
-    document.getElementById('progressFill').style.width=pct+'%';
-    document.getElementById('statusMsg').textContent=msg;
-  }
+  function setFile(f){if(!f||!f.name.endsWith('.pdf')){alert('Please select a PDF file.');return;}selectedFile=f;fileName.textContent='📄 '+f.name;fileName.style.display='block';cropBtn.disabled=false;document.getElementById('resultBox').style.display='none';document.getElementById('errorBox').style.display='none';}
+  function setProgress(pct,msg){document.getElementById('progressFill').style.width=pct+'%';document.getElementById('statusMsg').textContent=msg;}
   async function cropPDF(){
     if(!selectedFile)return;
-    cropBtn.disabled=true;
-    cropBtn.textContent='⏳ Processing...';
+    cropBtn.disabled=true;cropBtn.textContent='⏳ Processing...';
     document.getElementById('progressWrap').style.display='block';
     document.getElementById('resultBox').style.display='none';
     document.getElementById('errorBox').style.display='none';
     setProgress(15,'Uploading PDF...');
-    const fd=new FormData();
-    fd.append('pdf',selectedFile);
-    fd.append('mode',mode);
+    const fd=new FormData();fd.append('pdf',selectedFile);fd.append('mode',mode);
     try{
       setProgress(40,'Cropping labels...');
       const res=await fetch('/crop',{method:'POST',body:fd});
@@ -265,8 +259,7 @@ HTML = """<!DOCTYPE html>
       if(data.error)throw new Error(data.error);
       setProgress(100,'Done!');
       const dlBtn=document.getElementById('downloadBtn');
-      dlBtn.href='/download/'+data.file_id;
-      dlBtn.download=data.filename;
+      dlBtn.href='/download/'+data.file_id;dlBtn.download=data.filename;
       document.getElementById('resultBox').style.display='block';
       document.getElementById('progressWrap').style.display='none';
     }catch(err){
@@ -274,18 +267,9 @@ HTML = """<!DOCTYPE html>
       document.getElementById('errorBox').style.display='block';
       document.getElementById('progressWrap').style.display='none';
     }
-    cropBtn.disabled=false;
-    cropBtn.innerHTML='✂ Crop Labels';
+    cropBtn.disabled=false;cropBtn.innerHTML='✂ Crop Labels';
   }
-  function resetApp(){
-    selectedFile=null;fileInput.value='';
-    fileName.style.display='none';
-    cropBtn.disabled=true;
-    document.getElementById('resultBox').style.display='none';
-    document.getElementById('errorBox').style.display='none';
-    document.getElementById('progressWrap').style.display='none';
-    setProgress(0,'');
-  }
+  function resetApp(){selectedFile=null;fileInput.value='';fileName.style.display='none';cropBtn.disabled=true;document.getElementById('resultBox').style.display='none';document.getElementById('errorBox').style.display='none';document.getElementById('progressWrap').style.display='none';setProgress(0,'');}
 </script>
 </body>
 </html>"""
