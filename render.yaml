@@ -1,0 +1,2 @@
+buildCommand: apt-get install -y poppler-utils && pip install -r requirements.txt
+startCommand: gunicorn app:app
